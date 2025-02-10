@@ -1,5 +1,11 @@
 #include "moar.h"
 
+#ifdef _WIN32
+    #include <windows.h>
+#else
+    #include <unistd.h>
+#endif
+
 // Windows does not define the S_ISREG and S_ISDIR macros in stat.h, so we do.
 // We have to define _CRT_INTERNAL_NONSTDC_NAMES 1 before #including sys/stat.h
 // in order for Microsoft's stat.h to define names like S_IFMT, S_IFREG, and S_IFDIR,
@@ -14,10 +20,6 @@
 #  define IS_SLASH(c)     ((c) == L'\\' || (c) == L'/')
 #else
 #  define IS_SLASH(c)     ((c) == '/')
-#endif
-
-#ifndef PATH_MAX
-#  define PATH_MAX 2048
 #endif
 
 #define ERR_STR_MAX 1024
@@ -79,18 +81,58 @@ void MVM_dir_rmdir(MVMThreadContext *tc, MVMString *path) {
 
 /* Get the current working directory. */
 MVMString * MVM_dir_cwd(MVMThreadContext *tc) {
-    char path[PATH_MAX];
-    size_t max_path = PATH_MAX;
-    int cwd_error = uv_cwd(path, (size_t *)&max_path);
+    MVMString *retval;
 
-    if (cwd_error < 0) {
-        char *err = MVM_malloc(ERR_STR_MAX);
-        uv_strerror_r(cwd_error, err, ERR_STR_MAX);
-        char *waste[] = { err, NULL };
-        MVM_exception_throw_adhoc_free(tc, waste, "Failed to determine cwd: %s", err);
+#ifdef _WIN32
+    DWORD path_len;
+    LPTSTR path;
+
+    path_len = GetCurrentDirectory(0, NULL);
+    if (path_len == 0) {
+        DWORD errorMessageID = GetLastError();
+        LPSTR err = NULL;
+        FormatMessageA(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+                       NULL, errorMessageID, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), (LPSTR)&err, 0, NULL);
+        MVM_exception_throw_adhoc(tc, "Failed to determine cwd: %s", err);
+        LocalFree(err);
     }
 
-    return MVM_string_utf8_c8_decode(tc, tc->instance->VMString, path, strlen(path));
+    path = MVM_malloc(path_len * sizeof(TCHAR))
+
+    if (GetCurrentDirectory(path_len, path) == 0) {
+        DWORD errorMessageID = GetLastError();
+        LPSTR err = NULL;
+        FormatMessageA(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+                       NULL, errorMessageID, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), (LPSTR)&err, 0, NULL);
+        MVM_free(path);
+        MVM_exception_throw_adhoc(tc, "Failed to determine cwd: %s", err);
+        LocalFree(err);
+    }
+
+    retval = MVM_string_utf16_decode(tc, tc->instance->VMString, path, path_len);
+    MVM_free(path);
+#else
+    char *buffer;
+    size_t buffer_size = 4096;
+    char *path;
+
+    buffer = MVM_malloc(buffer_size);
+    path = getcwd(buffer, buffer_size);
+    while(path == NULL && errno == ERANGE) {
+        buffer_size *= 3;
+        buffer = MVM_realloc(buffer, buffer_size);
+        path = getcwd(buffer, buffer_size);
+    }
+
+    if (path == NULL) {
+        MVM_free(buffer);
+        MVM_exception_throw_adhoc(tc, "Failed to determine cwd: %s", strerror(errno));
+    }
+
+    retval = MVM_string_utf8_c8_decode(tc, tc->instance->VMString, path, strlen(path));
+    MVM_free(buffer);
+#endif
+    return retval;
 }
 
 /* Change directory. */
